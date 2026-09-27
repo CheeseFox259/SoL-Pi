@@ -1,13 +1,13 @@
 {
   "repository": "NVlabs/SoL-Pi",
-  "fetchedAt": "2026-09-27T13:25:16.382Z",
+  "fetchedAt": "2026-09-27T14:25:53.269Z",
   "currentStars": 3124,
   "weeks": [
     {
       "week": 1790467200,
-      "total": 7,
+      "total": 8,
       "days": [
-        7,
+        8,
         0,
         0,
         0,
@@ -44,14 +44,14 @@
     },
     {
       "week": 1788652800,
-      "total": 1501,
+      "total": 1500,
       "days": [
         0,
         0,
         1,
         7,
         581,
-        622,
+        621,
         290
       ]
     },
