@@ -41,9 +41,15 @@ export const POST_COMPACTION_PLAN_REMINDER =
 	"Online context compaction finished. The parent task is still active. " +
 	"Before continuing work, call update_plan with a fresh plan for the remaining work.";
 export const SKIPPED_COMPACTION_REMINDER =
-	"Online context compaction was not needed. The parent task is still active. " +
+	"Online context compaction was skipped. The existing context is still available. " +
 	"Continue the remaining work from the current plan.";
-const BENIGN_COMPACTION_REFUSALS = new Set(["Nothing to compact (session too small)", "Already compacted"]);
+// Pi rejects these before committing a replacement summary, so the current
+// context is still usable. Unknown errors and user cancellation remain distinct.
+const RECOVERABLE_COMPACTION_ERRORS = new Set([
+	"Nothing to compact (session too small)",
+	"Already compacted",
+	"Summarization failed: generation hit the token cap and the summary is incomplete",
+]);
 
 export type OnlineContextCompactOptions = {
 	readonly cacheWriteReadRatio?: number | null;
@@ -416,22 +422,24 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 					});
 				});
 				compactionInFlight = false;
-				const benignRefusal = compactionError !== undefined && BENIGN_COMPACTION_REFUSALS.has(compactionError.message);
+				const recoverableError = compactionError !== undefined && RECOVERABLE_COMPACTION_ERRORS.has(compactionError.message);
 				if (
 					compactionError &&
-					!benignRefusal &&
+					!recoverableError &&
 					compactionError.name !== "AbortError" &&
 					compactionError.message !== "Compaction cancelled"
 				) {
 					throw compactionError;
 				}
 
-				if (benignRefusal) {
+				if (recoverableError) {
 					compactionRefused = true;
+					pi.appendEntry("sol-pi-online-context-compact-skipped", { reason: compactionError!.message });
+					if (context.mode === "tui") context.ui.notify(`Online compaction skipped: ${compactionError!.message}`, "warning");
 					state = { ...state, awaitingPlanRestatement: true };
 					save();
 				}
-				if (compacted || benignRefusal) {
+				if (compacted || recoverableError) {
 					let resolveContinuation!: () => void;
 					const continuation: PendingContinuation = {
 						promise: new Promise<void>((resolve) => {

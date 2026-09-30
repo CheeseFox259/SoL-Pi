@@ -49,11 +49,18 @@ describe("Online Context Compact recovery", () => {
 		expect(restoreOnlineState(manager.entries).nativeCompactionCount).toBe(1);
 	});
 
-	it.each(["Nothing to compact (session too small)", "Already compacted"])("continues after %s and blocks repeated plan-only attempts", async (message) => {
+	it.each([
+		"Nothing to compact (session too small)",
+		"Already compacted",
+		"Summarization failed: generation hit the token cap and the summary is incomplete",
+	])("continues after %s and blocks repeated plan-only attempts", async (message) => {
 		const { pi, manager, ctx, boundary, compact, abort } = await scenario(new Error(message));
 		await boundary("first");
 		await expect(pi.emit("agent_settled", {}, ctx)).resolves.toBeUndefined();
 		expect(pi.sentMessages[0]?.message.content).toBe(SKIPPED_COMPACTION_REMINDER);
+		expect(manager.entries).toEqual(expect.arrayContaining([
+			expect.objectContaining({ type: "custom", customType: "sol-pi-online-context-compact-skipped", data: { reason: message } }),
+		]));
 		expect(restoreOnlineState(manager.entries)).toMatchObject({ nativeCompactionCount: 0, cacheDebtTokens: 0, cacheDebtRepaymentTokens: 0 });
 		for (const id of ["restated", "rekeyed-again", "rekeyed-once-more"]) {
 			await boundary(id);
