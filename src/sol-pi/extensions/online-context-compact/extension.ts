@@ -416,6 +416,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 							}
 						},
 						onError: (error) => {
+							activeDebt = undefined;
 							compactionError = error;
 							finish();
 						},

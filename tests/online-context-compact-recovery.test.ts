@@ -9,7 +9,7 @@ import { createOnlineContextCompactExtension, POST_COMPACTION_PLAN_REMINDER, SKI
 import { restoreOnlineState } from "../src/sol-pi/extensions/online-context-compact/state.ts";
 import { FakePi, FakeSessionManager, fakeContext } from "./helpers.ts";
 
-async function scenario(error?: Error) {
+async function scenario(error?: Error, unrelatedCompactionAfterError = false) {
 	const manager = new FakeSessionManager();
 	const messages = [{ role: "user" as const, content: "old ".repeat(4_000), timestamp: 1 }, fauxAssistantMessage("tail ".repeat(400))];
 	for (const message of messages) manager.appendMessage(message);
@@ -17,7 +17,10 @@ async function scenario(error?: Error) {
 	createOnlineContextCompactExtension({ cacheWriteReadRatio: 12.5, keepRecentTokens: 1 })(pi.asExtensionApi());
 	const abort = vi.fn();
 	const compact = vi.fn((options: CompactOptions = {}) => {
-		if (error) options.onError?.(error);
+		if (error) {
+			options.onError?.(error);
+			if (unrelatedCompactionAfterError) void pi.emit("session_compact", { fromExtension: false }, ctx);
+		}
 		else {
 			const entry = { type: "compaction", id: "compact-test", parentId: manager.getLeafId(), timestamp: new Date().toISOString(), summary: "memo", firstKeptEntryId: manager.entries[1]!.id, tokensBefore: 195_000 };
 			void pi.emit("session_compact", { compactionEntry: entry, fromExtension: false }, ctx).then(() => options.onComplete?.(entry));
@@ -87,5 +90,12 @@ describe("Online Context Compact recovery", () => {
 		await boundary("first");
 		await expect(pi.emit("agent_settled", {}, ctx)).rejects.toThrow("summarizer unavailable");
 		expect(pi.sentMessages).toHaveLength(0);
+	});
+
+	it("does not charge a failed attempt's debt to another compaction during recovery", async () => {
+		const { pi, ctx, manager, boundary } = await scenario(new Error("Already compacted"), true);
+		await boundary("first");
+		await pi.emit("agent_settled", {}, ctx);
+		expect(restoreOnlineState(manager.entries)).toMatchObject({ nativeCompactionCount: 1, cacheDebtTokens: 0, cacheDebtRepaymentTokens: 0 });
 	});
 });
