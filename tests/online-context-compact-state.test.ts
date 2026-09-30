@@ -9,6 +9,7 @@ import {
 	ONLINE_STATE_ENTRY,
 	recordBoundary,
 	recordCompaction,
+	recordCompletedPlanHandoff,
 	recordCorrection,
 	recordProviderRequest,
 	restoreOnlineState,
@@ -103,6 +104,8 @@ describe("Online Context Compact state snapshots", () => {
 			plan: PLAN,
 			awaitingPlanRestatement: true,
 			lastCompactionRequestCount: before.requestCount,
+			lastBoundaryRequestCount: before.requestCount,
+			completedBoundaryRequestCounts: [],
 			pendingProgress: [],
 			nativeCompactionCount: 1,
 			cacheDebtTokens: 1_200,
@@ -157,6 +160,22 @@ describe("Online Context Compact state snapshots", () => {
 			cacheDebtTokens: 900,
 			cacheDebtRepaymentTokens: 300,
 		});
+	});
+
+	it("resets a completed task's horizon at handoff while preserving its unpaid debt", () => {
+		const before = {
+			...recordBoundary(recordProviderRequest(initialOnlineState(), 5_000), PLAN, PROGRESS),
+			plan: PLAN.map((step) => ({ ...step, status: "completed" as const })),
+			cacheDebtTokens: 900,
+			cacheDebtRepaymentTokens: 300,
+		};
+		expect(recordCompletedPlanHandoff(before)).toMatchObject({
+			plan: [], awaitingPlanRestatement: false, completedBoundaryRequestCounts: [],
+			lastBoundaryRequestCount: before.requestCount, lastContextTokens: null,
+			cacheDebtTokens: 900, cacheDebtRepaymentTokens: 300,
+		});
+		const active = { ...before, plan: PLAN };
+		expect(recordCompletedPlanHandoff(active)).toBe(active);
 	});
 
 	it("drops stale plan history and debt when the user corrects an active run", () => {

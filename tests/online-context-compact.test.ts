@@ -282,7 +282,7 @@ describe("Online Context Compact extension", () => {
 		});
 
 		await pi.emit("session_start", { type: "session_start" }, context);
-		await pi.emitContext(buildSessionMessages(), context);
+		await pi.emitContext(manager.entries.flatMap((entry) => entry.type === "message" ? [entry.message] : []), context);
 		await pi.emit("before_provider_request", { type: "before_provider_request", payload: {} }, context);
 		await runPlan(pi, context, "plan-open", { steps: OPEN });
 		const planResult = await runPlan(pi, context, "plan-done", { steps: DONE, progress: PROGRESS });

@@ -4,7 +4,6 @@
  */
 import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
-	buildSessionContext,
 	estimateTokens,
 	findCutPoint,
 	sessionEntryToContextMessages,
@@ -19,11 +18,13 @@ import {
 	type CompactionDecision,
 } from "./economics.ts";
 import { analyzePlanTransition, formatPlanSnapshot, parsePlanSteps } from "./plan.ts";
+import { projectedEntryTokens } from "./projection.ts";
 import {
 	appendOnlineState,
 	initialOnlineState,
 	recordBoundary,
 	recordCompaction,
+	recordCompletedPlanHandoff,
 	recordCorrection,
 	recordProviderRequest,
 	restoreOnlineState,
@@ -39,6 +40,10 @@ export const BOUNDARY_COMPACTION_INSTRUCTIONS =
 export const POST_COMPACTION_PLAN_REMINDER =
 	"Online context compaction finished. The parent task is still active. " +
 	"Before continuing work, call update_plan with a fresh plan for the remaining work.";
+export const SKIPPED_COMPACTION_REMINDER =
+	"Online context compaction was not needed. The parent task is still active. " +
+	"Continue the remaining work from the current plan.";
+const BENIGN_COMPACTION_REFUSALS = new Set(["Nothing to compact (session too small)", "Already compacted"]);
 
 export type OnlineContextCompactOptions = {
 	readonly cacheWriteReadRatio?: number | null;
@@ -87,11 +92,20 @@ function progressSummary(input: PlanUpdateInput, completedStepId: string): Progr
 	};
 }
 
-function compactionTokenEstimate(entries: readonly SessionEntry[], startIndex: number, endIndex: number): number {
+function compactionTokenEstimate(
+	entries: readonly SessionEntry[],
+	startIndex: number,
+	endIndex: number,
+	projected?: ReadonlyMap<string, number>,
+): number {
 	let tokens = 0;
 	for (let index = startIndex; index < endIndex; index++) {
 		const entry = entries[index];
 		if (!entry || entry.type === "compaction") continue;
+		if (projected) {
+			tokens += projected.get(entry.id) ?? 0;
+			continue;
+		}
 		const message = sessionEntryToContextMessages(entry)[0];
 		if (message) tokens += estimateTokens(message);
 	}
@@ -132,8 +146,10 @@ function branchAfterAbort(entries: readonly SessionEntry[]): SessionEntry[] {
 export function estimateNativeCompactionTokens(
 	entries: readonly SessionEntry[],
 	keepRecentTokens: number,
+	projectedMessages?: readonly AgentMessage[],
 ): number {
 	const path = branchAfterAbort(entries);
+	const projected = projectedMessages === undefined ? undefined : projectedEntryTokens(entries, projectedMessages);
 	let startIndex = 0;
 	let previousSummaryTokens = 0;
 	for (let index = path.length - 1; index >= 0; index--) {
@@ -142,20 +158,18 @@ export function estimateNativeCompactionTokens(
 		const keptIndex = path.findIndex((item) => item.id === entry.firstKeptEntryId);
 		startIndex = keptIndex >= 0 ? keptIndex : index + 1;
 		const previousSummary = sessionEntryToContextMessages(entry)[0];
-		previousSummaryTokens = previousSummary ? estimateTokens(previousSummary) : 0;
+		previousSummaryTokens = projected
+			? projected.get(entry.id) ?? 0
+			: previousSummary ? estimateTokens(previousSummary) : 0;
 		break;
 	}
 
+	// Keep Pi's native cut on session entries; price only the corresponding
+	// messages that the provider actually saw after context projection.
 	const cut = findCutPoint(path, startIndex, path.length, keepRecentTokens);
-	const historyEnd = cut.isSplitTurn ? cut.turnStartIndex : cut.firstKeptEntryIndex;
-	const historyTokens =
-		historyEnd > startIndex ? compactionTokenEstimate(path, startIndex, historyEnd) : 0;
-	const prefixTokens =
-		cut.isSplitTurn && cut.turnStartIndex >= 0
-			? compactionTokenEstimate(path, cut.turnStartIndex, cut.firstKeptEntryIndex)
-			: 0;
-	const newHistoryTokens = historyTokens + prefixTokens;
-	return newHistoryTokens > 0 ? previousSummaryTokens + newHistoryTokens : 0;
+	const firstKept = cut.firstKeptEntryIndex;
+	if (compactionTokenEstimate(path, startIndex, firstKept) === 0) return 0;
+	return previousSummaryTokens + compactionTokenEstimate(path, startIndex, firstKept, projected);
 }
 
 function validPositiveInteger(value: unknown): value is number {
@@ -175,6 +189,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		let activeDebt: CacheDebt | undefined;
 		let nextContinuation: PendingContinuation | undefined;
 		let compactionInFlight = false;
+		let compactionRefused = false;
 
 		const releaseContinuation = (): void => {
 			const continuation = nextContinuation;
@@ -189,14 +204,13 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			releaseContinuation();
 			state = restoreOnlineState(context.sessionManager.getBranch());
 			restored = true;
-			observedMessages = buildSessionContext(
-				context.sessionManager.getEntries(),
-				context.sessionManager.getLeafId(),
-			).messages;
+			// Restoring raw history is not evidence of a provider-visible projection.
+			observedMessages = [];
 			pendingBoundary = undefined;
 			selected = undefined;
 			activeDebt = undefined;
 			compactionInFlight = false;
+			compactionRefused = false;
 		};
 		const ensureRestored = (context: ExtensionContext): void => {
 			if (!restored) restore(context);
@@ -261,10 +275,16 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		});
 
 		pi.on("input", (event, context) => {
+			compactionRefused = false;
+			ensureRestored(context);
 			if (event.streamingBehavior !== "steer" && !event.text.startsWith("CORRECTION:")) {
+				const next = recordCompletedPlanHandoff(state);
+				if (next !== state) {
+					state = next;
+					save();
+				}
 				return { action: "continue" as const };
 			}
-			ensureRestored(context);
 			pendingBoundary = undefined;
 			selected = undefined;
 			activeDebt = undefined;
@@ -274,9 +294,12 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		});
 
 		pi.on("turn_end", (event, context) => {
+			// Plan chatter cannot make a rejected compact feasible. Require actual
+			// tool work or new user input before attempting another boundary.
+			if (event.toolResults.some((item) => item.toolName !== "update_plan" && !item.isError)) compactionRefused = false;
 			const boundary = pendingBoundary;
 			pendingBoundary = undefined;
-			if (!boundary || selected) return;
+			if (!boundary || selected || compactionRefused) return;
 			const toolResult = event.toolResults.find((item) => item.toolCallId === boundary.toolCallId);
 			if (
 				event.message.role !== "assistant" ||
@@ -294,6 +317,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			const archiveTokens = estimateNativeCompactionTokens(
 				context.sessionManager.getBranch(),
 				keepRecentTokens,
+				observedMessages,
 			);
 			const contextWindowTokens = validPositiveInteger(usage?.contextWindow)
 				? usage.contextWindow
@@ -392,15 +416,22 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 					});
 				});
 				compactionInFlight = false;
+				const benignRefusal = compactionError !== undefined && BENIGN_COMPACTION_REFUSALS.has(compactionError.message);
 				if (
 					compactionError &&
+					!benignRefusal &&
 					compactionError.name !== "AbortError" &&
 					compactionError.message !== "Compaction cancelled"
 				) {
 					throw compactionError;
 				}
 
-				if (compacted) {
+				if (benignRefusal) {
+					compactionRefused = true;
+					state = { ...state, awaitingPlanRestatement: true };
+					save();
+				}
+				if (compacted || benignRefusal) {
 					let resolveContinuation!: () => void;
 					const continuation: PendingContinuation = {
 						promise: new Promise<void>((resolve) => {
@@ -413,7 +444,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 						pi.sendMessage(
 							{
 								customType: "sol-pi-online-context-compact",
-								content: POST_COMPACTION_PLAN_REMINDER,
+								content: compacted ? POST_COMPACTION_PLAN_REMINDER : SKIPPED_COMPACTION_REMINDER,
 								display: false,
 							},
 							{ triggerTurn: true },
@@ -424,11 +455,14 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 						throw error;
 					}
 					if (context.isIdle() && nextContinuation === continuation) {
+						// Newer Pi hosts defer runs until settled handlers return. Hand
+						// control back to that host instead of waiting on a deferred run.
 						nextContinuation = undefined;
 						continuation.resolve();
-						throw new Error("Online context compact continuation did not start");
+					} else {
+						// Pi 0.85.1 starts synchronously; keep its print-mode barrier.
+						await continuation.promise;
 					}
-					await continuation.promise;
 				}
 			} finally {
 				compactionInFlight = false;
@@ -439,6 +473,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 
 		pi.on("session_compact", (event, context) => {
 			ensureRestored(context);
+			compactionRefused = false;
 			state = recordCompaction(
 				state,
 				event.fromExtension || !activeDebt ? { debtTokens: 0, repaymentTokens: 0 } : activeDebt,
@@ -447,10 +482,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			pendingBoundary = undefined;
 			selected = undefined;
 			activeDebt = undefined;
-			observedMessages = buildSessionContext(
-				context.sessionManager.getEntries(),
-				context.sessionManager.getLeafId(),
-			).messages;
+			observedMessages = [];
 		});
 
 		pi.on("session_shutdown", () => {

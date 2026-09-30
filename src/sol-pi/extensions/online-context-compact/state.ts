@@ -203,6 +203,8 @@ export function recordCompaction(
 		awaitingPlanRestatement: true,
 		lastCompactionRequestCount: state.requestCount,
 		pendingProgress: [],
+		lastBoundaryRequestCount: state.requestCount,
+		completedBoundaryRequestCounts: [],
 		lastContextTokens: null,
 		positiveContextDeltaTotal: 0,
 		positiveContextDeltaCount: 0,
@@ -228,5 +230,22 @@ export function recordCorrection(state: OnlineState): OnlineState {
 		positiveContextDeltaCount: 0,
 		cacheDebtTokens: 0,
 		cacheDebtRepaymentTokens: 0,
+	};
+}
+
+/** A new user task must not inherit the completed task's request horizon. */
+export function recordCompletedPlanHandoff(state: OnlineState): OnlineState {
+	if (state.plan.length === 0 || state.plan.some((step) => step.status !== "completed")) return state;
+	return {
+		...state,
+		epoch: state.epoch + 1,
+		plan: [],
+		awaitingPlanRestatement: false,
+		pendingProgress: [],
+		lastBoundaryRequestCount: state.requestCount,
+		completedBoundaryRequestCounts: [],
+		lastContextTokens: null,
+		positiveContextDeltaTotal: 0,
+		positiveContextDeltaCount: 0,
 	};
 }
