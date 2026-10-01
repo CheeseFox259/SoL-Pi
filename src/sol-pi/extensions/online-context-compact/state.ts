@@ -20,8 +20,6 @@ export type OnlineState = {
 	readonly version: 1;
 	readonly epoch: number;
 	readonly plan: readonly PlanStep[];
-	/** True after a compaction or correction: the next update_plan re-states the current plan and must not register progress. */
-	readonly awaitingPlanRestatement: boolean;
 	readonly pendingProgress: readonly ProgressSummary[];
 	readonly requestCount: number;
 	/** requestCount when the last compaction ran; null before the first compaction. */
@@ -41,7 +39,6 @@ export function initialOnlineState(): OnlineState {
 		version: 1,
 		epoch: 0,
 		plan: [],
-		awaitingPlanRestatement: false,
 		pendingProgress: [],
 		requestCount: 0,
 		lastCompactionRequestCount: null,
@@ -107,8 +104,6 @@ function parseOnlineState(value: unknown): OnlineState | undefined {
 		!completedBoundaryRequestCounts ||
 		!completedBoundaryRequestCounts.every(nonNegativeInteger) ||
 		!nonNegativeInteger(record.epoch) ||
-		(typeof record.awaitingPlanRestatement !== "undefined" &&
-			typeof record.awaitingPlanRestatement !== "boolean") ||
 		(typeof record.lastCompactionRequestCount !== "undefined" &&
 			!(record.lastCompactionRequestCount === null || nonNegativeInteger(record.lastCompactionRequestCount))) ||
 		!nonNegativeInteger(record.requestCount) ||
@@ -127,7 +122,6 @@ function parseOnlineState(value: unknown): OnlineState | undefined {
 		version: 1,
 		epoch: record.epoch,
 		plan,
-		awaitingPlanRestatement: record.awaitingPlanRestatement ?? false,
 		pendingProgress: pendingProgress as readonly ProgressSummary[],
 		requestCount: record.requestCount,
 		lastCompactionRequestCount: record.lastCompactionRequestCount ?? null,
@@ -192,22 +186,13 @@ export function recordCompaction(
 	return {
 		...state,
 		epoch: state.epoch + 1,
-		// Preserve the plan: the post-compaction reminder asks for a fresh plan,
-		// and re-sending the same completed steps must not register as new
-		// progress boundaries, which would immediately re-trigger compaction.
+		// Preserve the plan and its progress samples. Compaction changes the
+		// context representation, not which steps have completed.
 		plan: [...state.plan],
-		// The reminder asks the model to re-state its plan; that first
-		// update_plan is a restoration, not progress. The model may re-key
-		// step ids when re-stating (observed: "3".."8" -> "p2".."p7"), so
-		// id-matching alone cannot suppress the bogus boundary.
-		awaitingPlanRestatement: true,
 		lastCompactionRequestCount: state.requestCount,
 		pendingProgress: [],
-		lastBoundaryRequestCount: state.requestCount,
-		completedBoundaryRequestCounts: [],
+		// Do not compare context sizes across the replacement summary.
 		lastContextTokens: null,
-		positiveContextDeltaTotal: 0,
-		positiveContextDeltaCount: 0,
 		nativeCompactionCount: state.nativeCompactionCount + 1,
 		cacheDebtTokens: state.cacheDebtTokens + Math.max(0, debt.debtTokens),
 		cacheDebtRepaymentTokens: state.cacheDebtRepaymentTokens + Math.max(0, debt.repaymentTokens),
@@ -219,9 +204,6 @@ export function recordCorrection(state: OnlineState): OnlineState {
 		...state,
 		epoch: state.epoch + 1,
 		plan: [],
-		// The correction drops the plan; the first update_plan afterwards
-		// re-states it and is not progress (same semantics as post-compaction).
-		awaitingPlanRestatement: true,
 		pendingProgress: [],
 		lastBoundaryRequestCount: state.requestCount,
 		completedBoundaryRequestCounts: [],
@@ -240,7 +222,6 @@ export function recordCompletedPlanHandoff(state: OnlineState): OnlineState {
 		...state,
 		epoch: state.epoch + 1,
 		plan: [],
-		awaitingPlanRestatement: false,
 		pendingProgress: [],
 		lastBoundaryRequestCount: state.requestCount,
 		completedBoundaryRequestCounts: [],

@@ -39,7 +39,7 @@ export const BOUNDARY_COMPACTION_INSTRUCTIONS =
 	"Preserve completed work, verification results, important decisions, and remaining work.";
 export const POST_COMPACTION_PLAN_REMINDER =
 	"Online context compaction finished. The parent task is still active. " +
-	"Before continuing work, call update_plan with a fresh plan for the remaining work.";
+	"Continue the remaining work from the current plan. Preserve existing step IDs when updating progress.";
 export const SKIPPED_COMPACTION_REMINDER =
 	"Online context compaction was skipped. The existing context is still available. " +
 	"Continue the remaining work from the current plan.";
@@ -237,17 +237,12 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 				if (!steps || steps.length === 0) throw new Error("Plan must contain at least one valid step");
 
 				const transition = analyzePlanTransition(state.plan, steps);
-				const restatement = state.awaitingPlanRestatement;
-				// The first plan after a compaction or correction re-states the
-				// current plan (the reminder asks for it). The model may re-key
-				// step ids while re-stating, so completed steps in that call are
-				// never fresh progress and must not arm another compaction.
-				const completedIds = restatement ? [] : transition.completedSteps.map((step) => step.id);
+				const completedIds = transition.completedSteps.map((step) => step.id);
 				if (completedIds.length > 0) {
 					state = recordBoundary(state, steps, progressSummary(input, completedIds[0] ?? ""));
 					if (!pendingBoundary) pendingBoundary = { toolCallId: input.toolCallId };
 				} else {
-					state = { ...state, plan: [...steps], awaitingPlanRestatement: false };
+					state = { ...state, plan: [...steps] };
 				}
 				save();
 
@@ -255,7 +250,6 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 					[formatPlanSnapshot(steps), ...transition.advice].join("\n"),
 					{
 						boundary: completedIds.length > 0,
-						restatement,
 						completed_step_ids: completedIds,
 						progress_recorded: completedIds.length > 0 && input.progress !== undefined,
 						task_status: "active",
@@ -437,8 +431,6 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 					compactionRefused = true;
 					pi.appendEntry("sol-pi-online-context-compact-skipped", { reason: compactionError!.message });
 					if (context.mode === "tui") context.ui.notify(`Online compaction skipped: ${compactionError!.message}`, "warning");
-					state = { ...state, awaitingPlanRestatement: true };
-					save();
 				}
 				if (compacted || recoverableError) {
 					let resolveContinuation!: () => void;

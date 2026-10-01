@@ -169,7 +169,7 @@ async function runCompactionScenario(requestedCompactions: 1 | 2): Promise<void>
 }
 
 async function runPostCompactionRestatementScenario(
-	reissued: readonly { readonly id: string; readonly goal: string; readonly status: "completed" }[],
+	reissuedPlans: readonly (readonly { readonly id: string; readonly goal: string; readonly status: "completed" }[])[],
 ): Promise<void> {
 	const cwd = await mkdtemp(join(tmpdir(), "sol-pi-occ-reissue-"));
 	const agentDir = join(cwd, "agent");
@@ -191,12 +191,12 @@ async function runPostCompactionRestatementScenario(
 				fauxToolCall("update_plan", { steps: DONE, progress: PROGRESS }, { id: "plan-done" }),
 				{ stopReason: "toolUse" },
 			),
-			// Post-compaction reminder turn: the model re-states the completed
-			// plan. Even with re-keyed ids the restatement must not register as a
-			// new progress boundary and must not trigger a second compaction.
-			fauxAssistantMessage(fauxToolCall("update_plan", { steps: reissued }, { id: "plan-reissued" }), {
-				stopReason: "toolUse",
-			}),
+			// Repeated snapshots must not create progress even past the cooldown
+			// or under window pressure. Newly introduced completed IDs are history.
+			...reissuedPlans.map((steps, index) => fauxAssistantMessage(
+				fauxToolCall("update_plan", { steps }, { id: `plan-reissued-${index}` }),
+				{ stopReason: "toolUse" },
+			)),
 			async () => {
 				await new Promise((resolve) => setTimeout(resolve, 80));
 				return fauxAssistantMessage(finalReply);
@@ -281,7 +281,7 @@ async function runPostCompactionRestatementScenario(
 						entry.display === false),
 			),
 		).toHaveLength(1);
-		expect(faux.state.callCount).toBe(4);
+		expect(faux.state.callCount).toBe(3 + reissuedPlans.length);
 		expect(session.getLastAssistantText()).toBe(finalReply);
 		expect(settledCount).toBe(2);
 		expect(session.isStreaming).toBe(false);
@@ -302,10 +302,14 @@ describe("Online Context Compact with a real AgentSession", () => {
 	}, 10_000);
 
 	it("compacts once when the post-compaction reminder re-states the identical plan", async () => {
-		await runPostCompactionRestatementScenario(DONE);
+		await runPostCompactionRestatementScenario([DONE, DONE, DONE]);
 	}, 10_000);
 
-	it("compacts once when the post-compaction restatement re-keys the plan ids", async () => {
-		await runPostCompactionRestatementScenario(REKEYED);
+	it("compacts once despite repeated re-keyed completed plans past the cooldown", async () => {
+		await runPostCompactionRestatementScenario([
+			REKEYED,
+			REKEYED.map((step) => ({ ...step, id: "renamed-again" })),
+			REKEYED.map((step) => ({ ...step, id: "renamed-once-more" })),
+		]);
 	}, 10_000);
 });

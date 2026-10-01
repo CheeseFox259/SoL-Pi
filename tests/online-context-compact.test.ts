@@ -99,6 +99,30 @@ describe("Online Context Compact extension", () => {
 		expect(await pi.emitContext(messages, context)).toEqual(messages);
 	});
 
+	it.each([0, 3])("records real progress on the first plan update after compaction, following %s work requests", async (workRequests) => {
+		const manager = new FakeSessionManager();
+		const pi = new FakePi(manager);
+		appendOnlineState(pi.asExtensionApi(), {
+			...initialOnlineState(), plan: OPEN, requestCount: 5,
+			lastBoundaryRequestCount: 2, completedBoundaryRequestCounts: [2],
+		});
+		registerOnlineContextCompact(pi.asExtensionApi());
+		const context = fakeContext(manager);
+		await pi.emit("session_start", {}, context);
+		await pi.emit("session_compact", { fromExtension: false }, context);
+		for (let index = 0; index < workRequests; index++) {
+			await pi.emit("before_provider_request", {}, context);
+			await pi.emit("turn_end", { message: assistant("work"), toolResults: [{ toolName: "bash", isError: false }] }, context);
+		}
+		await pi.emit("before_provider_request", {}, context);
+		const result = await runPlan(pi, context, "completed-after-compact", { steps: DONE, progress: PROGRESS });
+		expect(result.details).toMatchObject({ boundary: true, progress_recorded: true, completed_step_ids: ["build"] });
+		expect(restoreOnlineState(manager.entries)).toMatchObject({
+			plan: DONE, completedBoundaryRequestCounts: [2, 4 + workRequests],
+			pendingProgress: [expect.objectContaining({ stepId: "build", verification: PROGRESS.verification })],
+		});
+	});
+
 	it("matches Pi's removable messages across initial and repeated compactions", () => {
 		const manager = new FakeSessionManager();
 		manager.appendMessage({ role: "user", content: "x".repeat(100), timestamp: Date.now() });
