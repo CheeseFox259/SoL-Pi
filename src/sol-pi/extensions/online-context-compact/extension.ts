@@ -37,6 +37,29 @@ export const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
 export const DEFAULT_NATIVE_SUMMARY_TOKEN_ESTIMATE = 1_000;
 export const BOUNDARY_COMPACTION_INSTRUCTIONS =
 	"Preserve completed work, verification results, important decisions, and remaining work.";
+
+/**
+ * Build compaction instructions enriched with the actual progress summaries
+ * collected since the last compaction. Falls back to the static default when
+ * no progress data is available.
+ */
+export function buildCompactionInstructions(progress: readonly import("./state.ts").ProgressSummary[]): string {
+	if (progress.length === 0) return BOUNDARY_COMPACTION_INSTRUCTIONS;
+	const sections = progress.map((p) => {
+		const parts = [`Step "${p.stepId}" (${p.goal}):`];
+		if (p.filesChanged.length > 0) parts.push(`  Files: ${p.filesChanged.join(", ")}`);
+		if (p.verification.length > 0) parts.push(`  Verified: ${p.verification.join("; ")}`);
+		if (p.decisions.length > 0) parts.push(`  Decisions: ${p.decisions.join("; ")}`);
+		if (p.nextWork.length > 0) parts.push(`  Remaining: ${p.nextWork.join("; ")}`);
+		return parts.join("\n");
+	});
+	return [
+		"Preserve the following completed work in the summary:",
+		...sections,
+		"",
+		"Also preserve important decisions and remaining work.",
+	].join("\n");
+}
 export const POST_COMPACTION_PLAN_REMINDER =
 	"Online context compaction finished. The parent task is still active. " +
 	"Continue the remaining work from the current plan. Preserve existing step IDs when updating progress.";
@@ -154,6 +177,13 @@ export function estimateNativeCompactionTokens(
 	keepRecentTokens: number,
 	projectedMessages?: readonly AgentMessage[],
 ): number {
+	if (projectedMessages !== undefined && projectedMessages.length > 0) {
+		const totalProjected = projectedMessages.reduce((sum, msg) => sum + estimateTokens(msg), 0);
+		// If total visible tokens are less than keepRecentTokens, Pi's native compaction
+		// will have nothing to summarize and will throw "Nothing to compact".
+		if (totalProjected <= keepRecentTokens) return 0;
+	}
+
 	const path = branchAfterAbort(entries);
 	const projected = projectedMessages === undefined ? undefined : projectedEntryTokens(entries, projectedMessages);
 	let startIndex = 0;
@@ -174,8 +204,17 @@ export function estimateNativeCompactionTokens(
 	// messages that the provider actually saw after context projection.
 	const cut = findCutPoint(path, startIndex, path.length, keepRecentTokens);
 	const firstKept = cut.firstKeptEntryIndex;
+	if (firstKept <= startIndex) return 0;
 	if (compactionTokenEstimate(path, startIndex, firstKept) === 0) return 0;
-	return previousSummaryTokens + compactionTokenEstimate(path, startIndex, firstKept, projected);
+	const estimated = previousSummaryTokens + compactionTokenEstimate(path, startIndex, firstKept, projected);
+
+	// Guard against removable prefix overestimation:
+	// The removable prefix cannot exceed actual visible tokens minus keepRecentTokens.
+	if (projectedMessages !== undefined && projectedMessages.length > 0) {
+		const totalProjected = projectedMessages.reduce((sum, msg) => sum + estimateTokens(msg), 0);
+		return Math.min(estimated, Math.max(0, totalProjected - keepRecentTokens + previousSummaryTokens));
+	}
+	return estimated;
 }
 
 function validPositiveInteger(value: unknown): value is number {
@@ -389,8 +428,8 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 						finished = true;
 						resolve();
 					};
-					context.compact({
-						customInstructions: BOUNDARY_COMPACTION_INSTRUCTIONS,
+				context.compact({
+						customInstructions: buildCompactionInstructions(state.pendingProgress),
 						onComplete: (compaction) => {
 							try {
 								compacted = true;

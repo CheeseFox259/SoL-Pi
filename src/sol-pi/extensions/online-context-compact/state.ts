@@ -191,6 +191,12 @@ export function recordCompaction(
 		plan: [...state.plan],
 		lastCompactionRequestCount: state.requestCount,
 		pendingProgress: [],
+		// Reset the boundary request history after compaction. Keeping stale
+		// counts from before compaction inflates the remaining-request horizon
+		// and causes over-compaction in later phases. The plan itself
+		// (remaining steps) is still preserved for boundary counting.
+		lastBoundaryRequestCount: state.requestCount,
+		completedBoundaryRequestCounts: [],
 		// Do not compare context sizes across the replacement summary.
 		lastContextTokens: null,
 		nativeCompactionCount: state.nativeCompactionCount + 1,

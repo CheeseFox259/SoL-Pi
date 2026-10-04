@@ -202,7 +202,8 @@ export function decideCompaction(input: {
 		combinedBreakevenRequests !== null &&
 		combinedBreakevenRequests <= horizon.expectedRemainingRequests;
 	const economic = firstCompaction ? firstEconomic : baseEconomic && subsequentMarginOpen && carriedDebtGateOpen;
-	const compressible = savingTokens > 0;
+	const MIN_COMPACTION_SAVINGS = 1_000;
+	const compressible = savingTokens >= MIN_COMPACTION_SAVINGS;
 	const cooldownActive =
 		input.requestsSinceLastCompaction !== null &&
 		input.requestsSinceLastCompaction !== undefined &&
